@@ -10,6 +10,10 @@ A Pipecat AI voice agent built with a cascade pipeline (STT → LLM → TTS).
   - **STT**: OpenAI (Whisper)
   - **LLM**: OpenAI
   - **TTS**: OpenAI TTS
+- **Features**:
+  - Audio Recording
+  - Transcription
+  - Observability (Whisker)
 
 ## Setup
 
@@ -59,20 +63,128 @@ uv run pipecat eval run evals/starter_audio.yaml -v   # full audio round trip (l
 
 `eval:` criteria are scored by a judge LLM — a local Ollama by default (`ollama pull gemma4:12b`). The comments in the scenario files cover the schema and how to use an OpenAI judge instead.
 
+### Client
+
+1. **Navigate to client directory**:
+
+   ```bash
+   cd client
+   ```
+
+2. **Install dependencies**:
+
+   ```bash
+   npm install
+   ```
+
+3. **Configure environment variables**:
+
+   ```bash
+   cp env.example .env.local
+   # Edit .env.local if needed (defaults to localhost:7860)
+   ```
+
+   The client renders the [Pipecat UI](https://ui.pipecat.ai) console: the connect flow, transcript, metrics, device and session info, and a live event stream. Pipecat UI is a shadcn registry, so its components are installed as source under `src/components/pipecat`, `src/hooks` and `src/lib`, and they are yours to edit and style.
+
+   The console is built from those same components. To build your own UI, replace it with a composition of your own; this is the minimal one:
+
+   ```tsx
+   import { PipecatClientProvider } from '@pipecat-ai/client-react';
+
+   import { BotAudioOutput } from '@/components/pipecat/bot-audio';
+   import { ConnectButton } from '@/components/pipecat/connect-button';
+   import { Conversation } from '@/components/pipecat/conversation';
+   import { UserAudioControl } from '@/components/pipecat/user-audio-control';
+   import {
+     DEFAULT_TRANSPORT,
+     TRANSPORT_FACTORIES,
+     TRANSPORT_PROPS,
+   } from '@/config';
+   import { usePipecatApp } from '@/hooks/use-pipecat-app';
+
+   export const VoiceApp = () => {
+     const { client, connect, disconnect } = usePipecatApp({
+       transportType: DEFAULT_TRANSPORT,
+       transportFactory: TRANSPORT_FACTORIES[DEFAULT_TRANSPORT],
+       ...TRANSPORT_PROPS[DEFAULT_TRANSPORT],
+     });
+     if (!client) return null;
+     return (
+       <PipecatClientProvider client={client}>
+         <Conversation />
+         <UserAudioControl />
+         <ConnectButton onConnect={connect} onDisconnect={disconnect} />
+         <BotAudioOutput />
+       </PipecatClientProvider>
+     );
+   };
+   ```
+
+   To add more components or pull in upstream changes, use the shadcn CLI; the `@pipecat` registry is already configured in `components.json`:
+
+   ```bash
+   npx shadcn@latest add @pipecat/audio-visualizer-wave
+   npx shadcn@latest add @pipecat/conversation --diff
+   ```
+
+4. **Run development server**:
+
+   ```bash
+   npm run dev
+   ```
+
+5. **Open browser**:
+
+   http://localhost:3000
+
 ## Project Structure
 
 ```
-aster/
+aster-full/
 ├── server/              # Python bot server
 │   ├── bot.py           # Main bot implementation
 │   ├── evals/           # Behavioral eval scenarios
 │   ├── pyproject.toml   # Python dependencies
-│   ├── .env.example     # Environment variables template
+│   ├── env.example      # Environment variables template
 │   ├── .env             # Your API keys (git-ignored)
+│   └── ...
+├── client/              # React application
+│   ├── src/             # Client source code
+│   ├── package.json     # Node dependencies
 │   └── ...
 ├── .gitignore           # Git ignore patterns
 └── README.md            # This file
 ```
+## Observability
+
+This project includes observability tools to help you debug and monitor your bot:
+
+### Whisker - Live Pipeline Debugger
+
+**Whisker** is a live graphical debugger that lets you visualize pipelines and debug frames in real time.
+
+With Whisker you can:
+
+- 🗺️ View a live graph of your pipeline
+- ⚡ Watch frame processors flash in real time as frames pass through them
+- 📌 Select a processor to inspect the frames it has handled
+- 🔍 Filter frames by name to quickly find the ones you care about
+- 🧵 Select a frame to trace its full path through the pipeline
+- 💾 Save and load previous sessions for review and troubleshooting
+
+**To use Whisker:**
+
+1. Run an ngrok tunnel to expose your bot:
+
+   ```bash
+   ngrok http 9090
+   ```
+
+   > Tip: Use `--subdomain` for a repeatable ngrok URL
+
+2. Navigate to [https://whisker.pipecat.ai/](https://whisker.pipecat.ai/) and enter your ngrok URL (e.g., `your-subdomain.ngrok.io`)
+
+3. Once your bot is running, press connect
 ## Building with an AI coding agent
 
 Extending this bot with Claude Code, Codex, or another AI coding assistant? Give it live, accurate Pipecat context instead of stale training data with the **Pipecat Context Hub** — a local index of Pipecat docs, examples, and API source your agent queries over MCP:
@@ -88,6 +200,7 @@ pipecat context-hub install
 ## Learn More
 
 - [Pipecat Documentation](https://docs.pipecat.ai/)
+- [Pipecat UI Documentation](https://ui.pipecat.ai)
 - [Pipecat GitHub](https://github.com/pipecat-ai/pipecat)
 - [Pipecat Examples](https://github.com/pipecat-ai/pipecat-examples)
 - [Discord Community](https://discord.gg/pipecat)

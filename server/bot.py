@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-"""aster - Pipecat Voice Agent
+"""aster-full - Pipecat Voice Agent
 
 This bot uses a cascade pipeline: Speech-to-Text → LLM → Text-to-Speech
 
@@ -20,9 +20,12 @@ Run the bot using::
     uv run bot.py
 """
 
+import datetime
+import io
 import os
-from datetime import datetime
+import wave
 
+import aiofiles
 from dotenv import load_dotenv
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -32,9 +35,12 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
+    AssistantTurnStoppedMessage,
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
+    UserTurnStoppedMessage,
 )
+from pipecat.processors.audio.audio_buffer_processor import AudioBufferProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.llm_service import FunctionCallParams
@@ -43,13 +49,30 @@ from pipecat.services.openai.stt import OpenAISTTService
 from pipecat.services.openai.tts import OpenAITTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.workers.runner import WorkerRunner
+from pipecat_whisker import WhiskerServer
 
 load_dotenv(override=True)
 
 
 async def get_current_time(params: FunctionCallParams) -> None:
     """Devuelve la fecha y hora local actual en formato ISO 8601."""
-    await params.result_callback({"now": datetime.now().isoformat(timespec="seconds")})
+    await params.result_callback(
+        {"now": datetime.datetime.now().isoformat(timespec="seconds")}
+    )
+
+
+async def save_audio_file(audio: bytes, filename: str, sample_rate: int, num_channels: int):
+    """Save audio data to a WAV file."""
+    if len(audio) > 0:
+        with io.BytesIO() as buffer:
+            with wave.open(buffer, "wb") as wf:
+                wf.setsampwidth(2)
+                wf.setnchannels(num_channels)
+                wf.setframerate(sample_rate)
+                wf.writeframes(audio)
+            async with aiofiles.open(filename, "wb") as file:
+                await file.write(buffer.getvalue())
+        logger.info(f"Audio saved to {filename}")
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
@@ -64,31 +87,37 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     """
     logger.info("Starting bot")
 
-    # Los tres servicios pasan por el mismo proxy LiteLLM (compatible con OpenAI).
-    llm_base_url = os.getenv("LITELLM_BASE_URL", "https://litellm.jpabreu.com/v1")
-    api_key = os.getenv("LITELLM_API_KEY")
+    # LLM por el proxy LiteLLM; STT y TTS van directos a OpenRouter.
+    litellm_base_url = os.getenv("LITELLM_BASE_URL", "https://litellm.jpabreu.com/v1")
+    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
     # Speech-to-Text service
     stt = OpenAISTTService(
-        api_key=api_key,
-        base_url=llm_base_url,
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url=openrouter_base_url,
         settings=OpenAISTTService.Settings(
             model=os.getenv("STT_MODEL", "nvidia/parakeet-tdt-0.6b-v3"),
             language="es",
         ),
     )
 
-    # Text-to-Speech service
+    # Text-to-Speech service. OpenRouter devuelve PCM 44100 Hz mono, no los 24 kHz
+    # de OpenAI, así que hay que declararlo o el audio sale a otra velocidad.
     tts = OpenAITTSService(
-        api_key=api_key,
-        base_url=llm_base_url,
-        settings=OpenAITTSService.Settings(model=os.getenv("TTS_MODEL", "drama3")),
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url=openrouter_base_url,
+        sample_rate=44100,
+        settings=OpenAITTSService.Settings(
+            model=os.getenv("TTS_MODEL", "drama-3"),
+            # drama-3 solo acepta "alloy" en OpenRouter (el resto devuelve 400).
+            voice=os.getenv("TTS_VOICE", "alloy"),
+        ),
     )
 
     # LLM service
     llm = OpenAILLMService(
-        api_key=api_key,
-        base_url=llm_base_url,
+        api_key=os.getenv("LITELLM_API_KEY"),
+        base_url=litellm_base_url,
         settings=OpenAILLMService.Settings(
             model=os.getenv("LLM_MODEL", "lfm-2.5-24b-a2b"),
             system_instruction=(
@@ -107,6 +136,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
+    # Audio recording, started automatically when the pipeline starts
+    audio_buffer = AudioBufferProcessor(auto_start_recording=True)
+
     # Pipeline - assembled from reusable components
     pipeline = Pipeline(
         [
@@ -116,6 +148,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             llm,
             tts,
             transport.output(),
+            audio_buffer,
             assistant_aggregator,
         ]
     )
@@ -129,9 +162,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         observers=[],
     )
 
+    # Observabilidad (Whisker): el sink sirve el debugger en ws://localhost:9090.
+    whisker = WhiskerServer()
+    worker.add_observer(whisker.create_observer(worker))
+
     runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)
 
-    await runner.add_workers(worker)
+    await runner.add_workers(whisker, worker)
 
     @worker.rtvi.event_handler("on_client_ready")
     async def on_client_ready(rtvi):
@@ -154,6 +191,25 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
     async def on_client_disconnected(transport, client):
         logger.info("Client disconnected")
         await runner.cancel()
+
+    @user_aggregator.event_handler("on_user_turn_stopped")
+    async def on_user_turn_stopped(aggregator, strategy, message: UserTurnStoppedMessage):
+        timestamp = f"[{message.timestamp}] " if message.timestamp else ""
+        line = f"{timestamp}user: {message.content}"
+        logger.info(f"Transcript: {line}")
+
+    @assistant_aggregator.event_handler("on_assistant_turn_stopped")
+    async def on_assistant_turn_stopped(aggregator, message: AssistantTurnStoppedMessage):
+        timestamp = f"[{message.timestamp}] " if message.timestamp else ""
+        line = f"{timestamp}assistant: {message.content}"
+        logger.info(f"Transcript: {line}")
+
+    @audio_buffer.event_handler("on_audio_data")
+    async def on_audio_data(buffer, audio, sample_rate, num_channels):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"recordings/merged_{timestamp}.wav"
+        os.makedirs("recordings", exist_ok=True)
+        await save_audio_file(audio, filename, sample_rate, num_channels)
 
     await runner.run()
 
