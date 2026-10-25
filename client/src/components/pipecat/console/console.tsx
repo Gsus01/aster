@@ -36,6 +36,7 @@ import { ConsoleBotAudioPanel } from "@/components/pipecat/console/bot-audio-pan
 import { ConsoleBotVideoPanel } from "@/components/pipecat/console/bot-video-panel";
 import { SmallWebRTCCodecSetter } from "@/components/pipecat/console/codec-setter";
 import { ConsoleConversationPanel } from "@/components/pipecat/console/conversation-panel";
+import { DuplexTimeline } from "@/components/pipecat/duplex-timeline";
 import { ConsoleEventsPanel } from "@/components/pipecat/console/events-panel";
 import { ConsoleInfoPanel } from "@/components/pipecat/console/info-panel";
 import { ConsoleKeypadToggle } from "@/components/pipecat/console/keypad-toggle";
@@ -445,6 +446,7 @@ function ConsoleShell({
   const mediaStack = (collapsed: boolean) =>
     noBotArea ? null : (
       <div className="flex h-full min-h-0 flex-col gap-2">
+        <DuplexTimeline className="shrink-0 px-1" />
         {!noBotAudio && (
           <ConsoleBotAudioPanel
             collapsed={collapsed}
