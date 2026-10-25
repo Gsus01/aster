@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pipecat-context-hub": {
+      "command": "/home/gsus/.local/share/uv/tools/pipecat-ai/bin/python",
+      "args": ["-P", "-m", "pipecat_context_hub", "serve"],
+      "env": {}
+    }
+  }
+}
